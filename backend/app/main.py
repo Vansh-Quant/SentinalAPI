@@ -1,6 +1,6 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from scanner.parser import load_spec, normalize
+from scanner.parser import normalize
 from scanner.bopla import analyze_response
 
 app = FastAPI(title="SentinalAPI", version="0.1.0")
