@@ -22,6 +22,12 @@ SENSITIVE_KEYS = {
     "private_key",
     "authorization",
     "cookie",
+    "internal_notes",
+    "admin_flag",
+    "supplier_cost",
+    "margin",
+    "card_number",
+    "payment_method",
 }
 
 
