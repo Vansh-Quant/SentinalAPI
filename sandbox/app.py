@@ -16,7 +16,7 @@ def user(user_id: str, authorization: str | None = Header(default=None)):
     token = (authorization or "").removeprefix("Bearer ").strip()
     if token not in USERS:
         raise HTTPException(401, "authentication required")
-    user = USERS.get(user_id)
+    user = next((u for u in USERS.values() if u["id"] == user_id), None)
     if not user:
         raise HTTPException(404, "not found")
     return {
