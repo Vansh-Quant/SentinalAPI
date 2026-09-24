@@ -1,0 +1,30 @@
+# SentinelAPI backend — Python 3.11+ compatible (tested on 3.14)
+
+# Web framework
+fastapi>=0.115.0
+uvicorn>=0.30.0
+
+# Database
+sqlalchemy>=2.0.36
+psycopg[binary]>=3.2.0        # PostgreSQL driver (SQLAlchemy 2.0 "postgresql+psycopg://" dialect)
+
+# Validation / settings
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+email-validator>=2.1.0
+
+# Uploads (multipart form parsing)
+python-multipart>=0.0.9
+
+# OpenAPI spec parsing
+PyYAML>=6.0.2
+
+# Auth
+bcrypt>=4.2.0
+PyJWT>=2.9.0
+
+# HTTP client (scanner/sandbox communication — used from Phase 2 on)
+httpx>=0.27.0
+
+# Tests
+pytest>=8.3.0
