@@ -188,7 +188,11 @@ nav();document.getElementById('profileBtn')?.addEventListener('click',()=>go('pr
 <script>
 /* SentinelAPI backend adapter. The existing visual workspace stays unchanged. */
 (function () {
-  const API_BASE = window.SENTINEL_API_BASE || 'http://127.0.0.1:8001';
+  const API_BASE = window.SENTINEL_API_BASE || (
+    window.location.protocol === 'http:' || window.location.protocol === 'https:'
+      ? window.location.origin
+      : 'http://127.0.0.1:8001'
+  );
   const state = window.sentinelState = window.sentinelState || {
     token: localStorage.getItem('sentinel_token') || '',
     user: null,
