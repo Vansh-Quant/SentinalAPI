@@ -1,11 +1,13 @@
 """SentinelAPI backend — FastAPI application entrypoint."""
 
 import logging
+from pathlib import Path
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.api import api_router
@@ -104,3 +106,9 @@ def analyze(req: ResponseAnalysis):
         return {"finding": finding.__dict__ if finding else None}
     except (ImportError, ValueError) as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+# Serve integrated frontend after API routes.
+_FRONTEND_DIR = Path(__file__).resolve().parents[2] / "frontend"
+if _FRONTEND_DIR.exists():
+    app.mount("/", StaticFiles(directory=_FRONTEND_DIR, html=True), name="frontend")
