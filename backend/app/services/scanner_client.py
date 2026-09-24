@@ -98,7 +98,7 @@ def is_sandboxed_url(url: str) -> tuple[bool, str]:
 class ScannerClient:
     """Client for Scanner Engine REST API."""
 
-    def __init__(self, base_url: str | None = None, timeout_seconds: float = 1.0, max_retries: int = 1):
+    def __init__(self, base_url: str | None = None, timeout_seconds: float = 30.0, max_retries: int = 1):
         self.base_url = (base_url or settings.scanner_base_url).rstrip("/")
         self.timeout_seconds = timeout_seconds
         self.max_retries = max_retries
