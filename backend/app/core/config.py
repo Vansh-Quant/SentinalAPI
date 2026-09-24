@@ -45,6 +45,7 @@ class Settings(BaseSettings):
 
     # --- Scanner sandbox (Phase 2) ---
     sandbox_base_url: str = Field(default="http://localhost:9000", alias="SANDBOX_BASE_URL")
+    scanner_base_url: str = Field(default="http://localhost:9100", alias="SCANNER_BASE_URL")
 
     # --- App ---
     environment: str = Field(default="development", alias="ENVIRONMENT")
