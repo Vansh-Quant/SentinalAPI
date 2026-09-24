@@ -316,4 +316,4 @@ tests; Docker uses PostgreSQL.
 - The local scanner is deterministic demo logic, not a complete active BOLA/BOPLA engine.
 - Scan jobs are process-local background tasks; use one application worker for the demo.
 - Startup creates tables from ORM metadata; migrations are not included yet.
-- No frontend source is present in this repository; clients use the documented JSON and WebSocket contracts.
+- The integrated frontend is a single-file `frontend/index.html`; it uses the documented JSON and WebSocket contracts.
