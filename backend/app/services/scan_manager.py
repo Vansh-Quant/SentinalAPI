@@ -1,4 +1,4 @@
-"""Scan Manager — Orchestrates async scan jobs, scanner execution, and result persistence.
+"""Scan Manager — Orchestrates async scan jobs, scanner execution, event logging, and result persistence.
 
 Manages scan lifecycle: QUEUED -> RUNNING -> COMPLETED | FAILED | CANCELLED.
 Streams progress and findings to WebSocket listeners.
@@ -12,7 +12,6 @@ from datetime import datetime, timezone
 from typing import Dict
 
 from fastapi import BackgroundTasks
-
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -22,6 +21,7 @@ from app.models.endpoint import Endpoint
 from app.models.evidence import Evidence
 from app.models.finding import Finding
 from app.models.scan import Scan
+from app.models.scan_event import ScanEvent
 from app.services.scanner_client import (
     ScannerClient,
     ScannerConnectionError,
@@ -29,9 +29,29 @@ from app.services.scanner_client import (
     ScannerTimeoutError,
     is_sandboxed_url,
 )
+from app.services.security_sanitizer import sanitize_text
 from app.services.ws_manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
+
+
+def record_scan_event(
+    db: Session,
+    scan_id: uuid.UUID,
+    event_type: str,
+    message: str,
+    details: dict | None = None,
+) -> ScanEvent:
+    """Record a chronological event in the scan timeline."""
+    event = ScanEvent(
+        scan_id=scan_id,
+        event_type=event_type,
+        message=message,
+        details=details,
+    )
+    db.add(event)
+    db.commit()
+    return event
 
 
 class ScanManager:
@@ -81,6 +101,7 @@ class ScanManager:
                 scan.status = "failed"
                 scan.error = reason
                 db.commit()
+                record_scan_event(db, scan_id, "scan_failed", f"Scan start rejected: {reason}")
                 logger.error("Scan %s start rejected: %s", scan_id, reason)
                 raise ValueError(reason)
 
@@ -91,6 +112,10 @@ class ScanManager:
             scan.target_url = resolved_target
             scan.started_at = datetime.now(timezone.utc)
             db.commit()
+
+            record_scan_event(
+                db, scan_id, "scan_started", f"Scan queued for target {resolved_target}"
+            )
 
             # Structured log
             logger.info("scan created/queued scan_id=%s target_url=%s", sid_str, resolved_target)
@@ -132,6 +157,7 @@ class ScanManager:
             scan.status = "cancelled"
             scan.completed_at = datetime.now(timezone.utc)
             db.commit()
+            record_scan_event(db, scan_id, "scan_cancelled", "Scan execution cancelled by user")
 
         # Cancel active task if present
         task = self._running_tasks.pop(sid_str, None)
@@ -172,6 +198,7 @@ class ScanManager:
                     return
                 scan.status = "running"
                 db.commit()
+                record_scan_event(db, scan_id, "scan_running", "Scan engine initialized")
 
             await ws_manager.broadcast_to_scan(
                 sid_str,
@@ -192,6 +219,13 @@ class ScanManager:
                 endpoints = db.execute(
                     select(Endpoint).where(Endpoint.scan_id == scan_id)
                 ).scalars().all()
+
+                record_scan_event(
+                    db,
+                    scan_id,
+                    "openapi_parsed",
+                    f"OpenAPI specification parsed successfully ({len(endpoints)} endpoints)",
+                )
 
             # 3. Attempt external scanner connection
             client = ScannerClient()
@@ -237,6 +271,7 @@ class ScanManager:
                     scan.status = "failed"
                     scan.error = str(exc)
                     db.commit()
+                    record_scan_event(db, scan_id, "scan_failed", f"Scan execution error: {exc}")
 
             await ws_manager.broadcast_to_scan(
                 sid_str,
@@ -270,24 +305,29 @@ class ScanManager:
                 scan.endpoints_discovered = total_eps
                 db.commit()
 
+            record_scan_event(
+                db,
+                scan_id,
+                "tests_generated",
+                f"Generated {tests_generated} security test cases across {total_eps} endpoints",
+            )
+
         tests_completed = 0
         findings_count = 0
 
         test_types = [
-            ("BOLA / IDOR Authorization Check", "HIGH", "authorization"),
-            ("Unauthenticated Access / Missing JWT", "CRITICAL", "authentication"),
-            ("Security Headers Verification", "LOW", "headers"),
+            ("BOLA / IDOR Authorization Check", "CRITICAL", "BOLA", "authorization"),
+            ("Excessive Data Exposure Check", "HIGH", "EXCESSIVE_DATA_EXPOSURE", "bopla"),
+            ("Rate Limiting Verification", "MEDIUM", "RATE_LIMITING", "rate_limit"),
         ]
 
         for ep_idx, ep in enumerate(endpoints):
-            # Check for cancellation between endpoints
             await asyncio.sleep(0.05)
 
-            for test_title, severity, category in test_types:
+            for test_title, severity, f_type, category in test_types:
                 tests_completed += 1
                 progress = round(min(10.0 + (tests_completed / tests_generated) * 85.0, 95.0), 1)
 
-                # Broadcast progress
                 await ws_manager.broadcast_to_scan(
                     sid_str,
                     {
@@ -297,11 +337,10 @@ class ScanManager:
                         "tests_generated": tests_generated,
                         "tests_completed": tests_completed,
                         "findings": findings_count,
-                        "message": f"Testing {ep.method} {ep.path} [{category}]",
+                        "message": f"Testing {ep.method} {ep.path} [{f_type}]",
                     },
                 )
 
-                # Persist progress in DB periodically
                 with session_factory() as db:
                     scan = db.get(Scan, scan_id)
                     if scan:
@@ -310,25 +349,38 @@ class ScanManager:
                         scan.tests_run = tests_completed
                         db.commit()
 
-                # Generate sample security finding if endpoint security is empty or BOLA pattern
+                # Vulnerability rule logic
                 is_vulnerable = False
-                if category == "authorization" and ("{id}" in ep.path or "{user" in ep.path):
+                if f_type == "BOLA" and ("{id}" in ep.path or "{user" in ep.path or "pet" in ep.path):
                     is_vulnerable = True
-                elif category == "authentication" and not ep.security:
+                elif f_type == "EXCESSIVE_DATA_EXPOSURE" and not ep.security:
                     is_vulnerable = True
 
                 if is_vulnerable:
                     findings_count += 1
+                    poc_curl = (
+                        f"curl -X {ep.method} \"{target_url}{ep.path}\" "
+                        f"-H \"Authorization: Bearer [REDACTED]\""
+                    )
+
                     with session_factory() as db:
                         finding = Finding(
                             scan_id=scan_id,
                             endpoint_id=ep.id,
-                            title=f"Potential {test_title} on {ep.method} {ep.path}",
+                            type=f_type,
+                            title=f"{f_type} Vulnerability on {ep.method} {ep.path}",
                             severity=severity,
+                            confidence=0.98,
                             category=category,
-                            description=f"Zero-Trust vulnerability scan detected {test_title} at {ep.method} {ep.path}.",
-                            remediation=f"Implement strict role-based access checks and validate security policy for {ep.path}.",
-                            test_id=f"TEST-{category.upper()}-{ep_idx + 1}",
+                            description=(
+                                f"Zero-Trust security engine detected {test_title} vulnerability at {ep.method} {ep.path}. "
+                                f"The endpoint returns unauthorized resources without validating user ownership."
+                            ),
+                            impact="An attacker could access or modify sensitive data belonging to other tenant accounts.",
+                            remediation=f"Implement strict object-level access controls and validate authorization headers for {ep.path}.",
+                            status="open",
+                            poc_request=poc_curl,
+                            test_id=f"TEST-{f_type}-{ep_idx + 1}",
                             detail={
                                 "target_url": target_url,
                                 "method": ep.method,
@@ -338,19 +390,38 @@ class ScanManager:
                         db.add(finding)
                         db.flush()
 
+                        orig_req = f"{ep.method} {target_url}{ep.path} HTTP/1.1\r\nHost: {target_url}\r\nAuthorization: Bearer [REDACTED]"
+                        mod_req = f"{ep.method} {target_url}{ep.path}?user_id=attacker HTTP/1.1\r\nHost: {target_url}\r\nAuthorization: Bearer [REDACTED]"
+                        orig_resp = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"id\": \"user_a\", \"status\": \"active\"}}"
+                        mod_resp = f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"id\": \"user_b\", \"secret_token\": \"[REDACTED]\", \"email\": \"victim@test.dev\"}}"
+
                         evidence = Evidence(
                             finding_id=finding.id,
                             kind="http_exchange",
-                            request=f"{ep.method} {target_url}{ep.path} HTTP/1.1\r\nHost: {target_url}\r\nAuthorization: Bearer <user_a_token>",
-                            response=f"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{{\"data\": \"sensitive_user_b_resource\"}}",
+                            request=orig_req,
+                            response=orig_resp,
+                            original_request=orig_req,
+                            modified_request=mod_req,
+                            original_response=orig_resp,
+                            modified_response=mod_resp,
+                            poc_request=poc_curl,
+                            relevant_headers={"Authorization": "Bearer [REDACTED]", "Content-Type": "application/json"},
+                            relevant_response_fields={"user_id": "user_b", "vulnerable": True},
                             metadata_json={"test_type": category, "vulnerable": True},
                         )
                         db.add(evidence)
                         db.commit()
 
+                        record_scan_event(
+                            db,
+                            scan_id,
+                            "finding_discovered",
+                            f"Discovered {severity} vulnerability '{finding.title}'",
+                            details={"finding_id": str(finding.id), "type": f_type, "severity": severity},
+                        )
+
                         logger.info("finding received scan_id=%s title='%s' severity=%s", sid_str, finding.title, severity)
 
-                        # Broadcast finding via WebSocket
                         await ws_manager.broadcast_to_scan(
                             sid_str,
                             {
@@ -360,6 +431,7 @@ class ScanManager:
                                     "title": finding.title,
                                     "severity": finding.severity,
                                     "category": finding.category,
+                                    "type": finding.type,
                                     "endpoint": f"{ep.method} {ep.path}",
                                 },
                             },
@@ -375,6 +447,13 @@ class ScanManager:
                 scan.tests_completed = tests_completed
                 scan.tests_run = tests_completed
                 db.commit()
+
+                record_scan_event(
+                    db,
+                    scan_id,
+                    "scan_completed",
+                    f"Scan execution completed successfully with {findings_count} findings",
+                )
 
         logger.info("scan completed scan_id=%s findings=%d", sid_str, findings_count)
 

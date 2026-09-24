@@ -24,7 +24,15 @@ class Evidence(Base):
     kind: Mapped[str] = mapped_column(String(50), nullable=False, default="http_exchange")
     request: Mapped[str | None] = mapped_column(Text, nullable=True)
     response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    original_request: Mapped[str | None] = mapped_column(Text, nullable=True)
+    modified_request: Mapped[str | None] = mapped_column(Text, nullable=True)
+    original_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    modified_response: Mapped[str | None] = mapped_column(Text, nullable=True)
+    poc_request: Mapped[str | None] = mapped_column(Text, nullable=True)
+    relevant_headers: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    relevant_response_fields: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )

@@ -57,6 +57,9 @@ class Scan(Base):
     findings: Mapped[list["Finding"]] = relationship(
         back_populates="scan", cascade="all, delete-orphan"
     )
+    events: Mapped[list["ScanEvent"]] = relationship(
+        back_populates="scan", cascade="all, delete-orphan"
+    )
 
     def __repr__(self) -> str:  # pragma: no cover
         return f"<Scan {self.id} status={self.status}>"

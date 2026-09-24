@@ -3,7 +3,7 @@
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, DateTime, ForeignKey, String, Text, func
+from sqlalchemy import JSON, DateTime, Float, ForeignKey, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.database import Base, GUID
@@ -27,11 +27,16 @@ class Finding(Base):
         index=True,
     )
 
+    type: Mapped[str] = mapped_column(String(50), nullable=False, default="BOLA", index=True)
     title: Mapped[str] = mapped_column(String(255), nullable=False)
-    severity: Mapped[str] = mapped_column(String(10), nullable=False, default="info", index=True)
-    category: Mapped[str] = mapped_column(String(50), nullable=False, default="other")
+    severity: Mapped[str] = mapped_column(String(10), nullable=False, default="HIGH", index=True)
+    confidence: Mapped[float] = mapped_column(Float, nullable=False, default=0.95)
+    category: Mapped[str] = mapped_column(String(50), nullable=False, default="authorization")
     description: Mapped[str | None] = mapped_column(Text, nullable=True)
+    impact: Mapped[str | None] = mapped_column(Text, nullable=True)
     remediation: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open", index=True)
+    poc_request: Mapped[str | None] = mapped_column(Text, nullable=True)
     detail: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     test_id: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
 
@@ -46,4 +51,4 @@ class Finding(Base):
     )
 
     def __repr__(self) -> str:  # pragma: no cover
-        return f"<Finding {self.severity} {self.title}>"
+        return f"<Finding {self.severity} {self.type} - {self.title}>"

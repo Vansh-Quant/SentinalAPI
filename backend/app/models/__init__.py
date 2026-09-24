@@ -10,5 +10,6 @@ from app.models.scan import Scan
 from app.models.endpoint import Endpoint
 from app.models.finding import Finding
 from app.models.evidence import Evidence
+from app.models.scan_event import ScanEvent
 
-__all__ = ["User", "Project", "Scan", "Endpoint", "Finding", "Evidence"]
+__all__ = ["User", "Project", "Scan", "Endpoint", "Finding", "Evidence", "ScanEvent"]
