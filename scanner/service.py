@@ -23,6 +23,17 @@ def health():
 @app.post("/scan/start")
 def start(req:ScanRequest):
     findings=[]
+    # Identity values may be bearer tokens or username:password credentials supplied for the authorized sandbox.
+    identities=dict(req.identities)
+    with httpx.Client(timeout=8.0) as auth_client:
+        for name,value in list(identities.items()):
+            if ":" in value and not value.lower().startswith("bearer "):
+                username,password=value.split(":",1)
+                login=auth_client.post(req.target_url.rstrip()+"/auth/login",json={"username":username,"password":password})
+                login.raise_for_status()
+                token=login.json().get("token")
+                if token: identities[name]=token
+    
     tests=0
     with httpx.Client(timeout=8.0) as client:
         for path,item in req.openapi_spec.get("paths",{}).items():
