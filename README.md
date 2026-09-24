@@ -24,6 +24,8 @@ Backend API (FastAPI)
 Scan Manager (Async Task Engine)
    │
    ├── Zero-Trust Sandbox Isolation Policy
+  ├── Optional External Scanner Service (`SCANNER_BASE_URL`)
+  ├── Deterministic Local Scanner Fallback
    │
    ▼
 Scanner Engine (BOLA / BOPLA Scanner & Sandbox API Adapter)
@@ -63,6 +65,8 @@ MAX_UPLOAD_SIZE=10485760 # 10 MiB
 
 # Scanner Sandbox Settings (Zero-Trust)
 SANDBOX_BASE_URL=http://localhost:9000
+# Optional external scanner; unavailable service uses the local fallback.
+SCANNER_BASE_URL=http://localhost:9100
 
 # Application Environment
 ENVIRONMENT=development
@@ -114,6 +118,27 @@ uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 Interactive API documentation will be available at:
 - Swagger UI: `http://localhost:8000/docs`
 - ReDoc: `http://localhost:8000/redoc`
+
+### 4. Run the vulnerable sandbox
+
+From the repository root in a second terminal:
+
+```bash
+uvicorn sandbox.http_app:app --host 127.0.0.1 --port 9000
+```
+
+### Docker
+
+Start PostgreSQL, the backend, and the provided sandbox with:
+
+```bash
+docker compose up --build
+```
+
+The external scanner service in the compose file is a placeholder so outage
+fallback behavior is reproducible. Replace it with a compatible scanner
+service for external execution. The backend is at `http://localhost:8000` and
+the sandbox is at `http://localhost:9000`.
 
 ---
 
@@ -252,3 +277,43 @@ ws.onmessage = (event) => {
 ---
 
 > **Zero-Trust Security Disclaimer**: Only scan API targets and systems that you are explicitly authorized to test.
+
+## Scanner contract
+
+The optional scanner service receives `POST /scan/start` at
+`SCANNER_BASE_URL` with `scan_id`, `target_url`, `openapi_spec`, and optional
+`identities`, and must return a JSON object. Connection, timeout, and HTTP
+errors use the deterministic local engine; malformed JSON is a hard failure.
+Cancellation uses `POST /scan/{scan_id}/cancel`.
+
+The target URL is independently validated before queueing. Public internet
+hosts are rejected by the zero-trust sandbox policy.
+
+## WebSocket contract
+
+Connect to `WS /ws/scans/{scan_id}` or `/api/scans/{scan_id}/ws`. Events have
+`type` values `status`, `progress`, `finding`, `completed`, or `error`.
+After a disconnect, reconnect and use `/api/scans/{scan_id}/status` as the
+authoritative state.
+
+## Database summary
+
+The schema contains users, projects, scans, endpoints, findings, evidence, and
+scan events. Scan-owned records cascade on deletion, and scan/status,
+severity, endpoint, and event fields are indexed. SQLite is used for local
+tests; Docker uses PostgreSQL.
+
+## Demo checklist
+
+1. Register or log in and create a project targeting the provided sandbox.
+2. Upload `backend/tests/fixtures/petstore_minimal.json`.
+3. Start a scan with `http://localhost:9000`.
+4. Watch WebSocket progress, then open dashboard, attack surface, findings,
+   finding evidence/PoC, and report endpoints.
+
+## Known limitations
+
+- The local scanner is deterministic demo logic, not a complete active BOLA/BOPLA engine.
+- Scan jobs are process-local background tasks; use one application worker for the demo.
+- Startup creates tables from ORM metadata; migrations are not included yet.
+- No frontend source is present in this repository; clients use the documented JSON and WebSocket contracts.
