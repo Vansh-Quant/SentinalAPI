@@ -180,7 +180,7 @@ nav();document.getElementById('profileBtn')?.addEventListener('click',()=>go('pr
     const blocks=[...main.children].filter(e=>e.nodeType===1 && !e.matches('header,.topbar,.breadcrumb'));
     const last=blocks[blocks.length-1]; if(last) last.classList.add('detail-fill');
   }
-  new MutationObserver(fill).observe(document.body,{subtree:true,attributes:true,attributeFilter:['class','style']});
+  new MutationObserver(fill).observe(document.body,{subtree:true,childList:true});
   window.addEventListener('resize',fill);
   setTimeout(fill,100);
 })();
