@@ -56,6 +56,11 @@ async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONR
 app.include_router(api_router, prefix="/api")
 
 
+@app.get("/health")
+def health():
+    return {"status": "ok", "service": "sentinalapi"}
+
+
 @app.websocket("/ws/scans/{scan_id}")
 async def root_websocket_scan_updates(websocket: WebSocket, scan_id: str):
     """Direct WebSocket endpoint at /ws/scans/{scan_id} for live scan updates."""
