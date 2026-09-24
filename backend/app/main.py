@@ -3,9 +3,10 @@
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel
 
 from app.api import api_router
 from app.core.config import settings
@@ -67,3 +68,34 @@ async def root_websocket_scan_updates(websocket: WebSocket, scan_id: str):
     except WebSocketDisconnect:
         ws_manager.disconnect(scan_id, websocket)
 
+
+# --- Helper endpoints for scanner parsing / analysis ---
+
+class SpecRequest(BaseModel):
+    spec: dict
+
+
+class ResponseAnalysis(BaseModel):
+    endpoint: str
+    response: dict
+    expected_fields: list[str] = []
+
+
+@app.post("/api/scan/parse")
+def parse(req: SpecRequest):
+    try:
+        from scanner.parser import normalize
+        endpoints = normalize(req.spec)
+        return {"count": len(endpoints), "endpoints": [e.__dict__ for e in endpoints]}
+    except (ImportError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/api/scan/analyze-response")
+def analyze(req: ResponseAnalysis):
+    try:
+        from scanner.bopla import analyze_response
+        finding = analyze_response(req.endpoint, req.response, set(req.expected_fields))
+        return {"finding": finding.__dict__ if finding else None}
+    except (ImportError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc))

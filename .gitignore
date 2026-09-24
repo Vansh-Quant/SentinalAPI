@@ -1,10 +1,13 @@
 # Secrets — never commit
 .env
+.env.*
+!.env.example
 backend/.env
 
 # Python
 __pycache__/
 *.py[cod]
+*.pyc
 .venv/
 venv/
 .pytest_cache/

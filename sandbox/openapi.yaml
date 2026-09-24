@@ -1,0 +1,73 @@
+openapi: 3.0.3
+info:
+  title: SentinelAPI Vulnerable Sandbox
+  version: 1.0.0
+servers:
+  - url: http://127.0.0.1:8765
+paths:
+  /auth/login:
+    post:
+      operationId: login
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [username, password]
+              properties:
+                username: {type: string}
+                password: {type: string}
+      responses:
+        "200": {description: Login response}
+  /users:
+    get:
+      operationId: getUsers
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: User list}
+  /users/{user_id}:
+    get:
+      operationId: getUser
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: user_id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: User object}
+  /profile:
+    get:
+      operationId: getProfile
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Own profile}
+  /orders:
+    get:
+      operationId: getOrders
+      security: [{bearerAuth: []}]
+      responses:
+        "200": {description: Own orders}
+  /orders/{order_id}:
+    get:
+      operationId: getOrder
+      security: [{bearerAuth: []}]
+      parameters:
+        - {name: order_id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: Order object}
+  /products:
+    get:
+      operationId: getProducts
+      responses:
+        "200": {description: Public products}
+  /products/{product_id}:
+    get:
+      operationId: getProduct
+      parameters:
+        - {name: product_id, in: path, required: true, schema: {type: integer}}
+      responses:
+        "200": {description: Public product}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer

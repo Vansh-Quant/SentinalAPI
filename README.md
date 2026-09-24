@@ -1,6 +1,6 @@
 # SentinelAPI — Zero-Trust API Vulnerability Scanner
 
-SentinelAPI is a Zero-Trust API Vulnerability Scanner designed to analyze OpenAPI specifications, discover API endpoints, enforce strict sandbox target isolation, and orchestrate security vulnerability scans against target environments.
+SentinelAPI is a Zero-Trust API Vulnerability Scanner designed to analyze OpenAPI specifications, discover API endpoints, enforce strict sandbox target isolation, run security vulnerability scans (BOLA, BOPLA, Auth Bypass, Headers), and manage persistent scan records and real-time updates.
 
 ---
 
@@ -24,28 +24,28 @@ Scan Manager (Async Task Engine)
    ├── Zero-Trust Sandbox Isolation Policy
    │
    ▼
-Scanner Engine (HTTP API Client / Mock Scanner Adapter)
+Scanner Engine (BOLA / BOPLA Scanner & Sandbox API Adapter)
    │
    ▼
-Target Sandbox API
+Target Sandbox API (`sandbox/`)
 ```
 
 ---
 
-## 🛠️ Technology Stack
+## 🛠️ Project Components & Stack
 
-- **Framework**: FastAPI (Python 3.11+)
-- **Database**: PostgreSQL (Production) / SQLite (Development & Testing)
-- **ORM & Validation**: SQLAlchemy 2.0 (Async-compatible), Pydantic v2
-- **Authentication**: JWT (JSON Web Tokens) with Passlib & Bcrypt password hashing
-- **Networking**: `httpx` for HTTP communication, WebSockets for live status updates
-- **Testing**: `pytest` test suite
+- **Backend**: FastAPI, SQLAlchemy 2.0, Pydantic v2, JWT Auth (`backend/`)
+- **Scanner Engine**: OpenAPI Normalizer, BOLA/BOPLA Analyzer, HTTP Executor (`scanner/`)
+- **Sandbox API**: Intentionally Vulnerable Mock Target API (`sandbox/`)
+- **Database**: PostgreSQL (Production) / SQLite (Local & Testing)
+- **Real-Time Feed**: WebSockets (`/ws/scans/{scan_id}`)
+- **Testing**: `pytest` unit and integration test suite (`tests/` & `backend/tests/`)
 
 ---
 
 ## ⚙️ Environment Variables Configuration
 
-Create a `.env` file in the `backend/` directory or root directory based on `.env.example`:
+Create a `.env` file in the root or `backend/` directory based on `.env.example`:
 
 ```env
 # Security (Set a long random key in production)
@@ -53,8 +53,6 @@ SECRET_KEY=dev-only-secret-do-not-use-in-production-0123456789abcdef
 ACCESS_TOKEN_EXPIRE_MINUTES=1440
 
 # Database Connection URL
-# PostgreSQL Example: postgresql+psycopg2://sentinel:sentinelpass@localhost:5432/sentinel_db
-# SQLite Fallback:
 DATABASE_URL=sqlite:///./sentinel.db
 
 # Upload limits
@@ -79,7 +77,6 @@ LOG_LEVEL=INFO
 Create and activate a virtual environment, then install dependencies:
 
 ```bash
-cd backend
 python -m venv .venv
 
 # On Windows:
@@ -91,40 +88,28 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 2. Database Setup
+---
 
-#### Option A: PostgreSQL (Recommended for Production)
+### 2. Run Automated Tests
 
-Start PostgreSQL using Docker:
+Run the full pytest suite across scanner engine and backend:
 
 ```bash
-docker-compose up -d postgres
+pytest
 ```
-
-Or run PostgreSQL locally and create the database:
-
-```sql
-CREATE DATABASE sentinel_db;
-CREATE USER sentinel WITH PASSWORD 'sentinelpass';
-GRANT ALL PRIVILEGES ON DATABASE sentinel_db TO sentinel;
-```
-
-#### Option B: SQLite (Quick Local Development)
-
-No setup needed! SQLite will automatically create `sentinel.db` on launch.
 
 ---
 
 ### 3. Run Backend Server
 
-Start the FastAPI server using `uvicorn`:
+Start the FastAPI server:
 
 ```bash
 cd backend
 uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-The API docs will be available at:
+Interactive API documentation will be available at:
 - Swagger UI: `http://localhost:8000/docs`
 - ReDoc: `http://localhost:8000/redoc`
 
@@ -142,14 +127,16 @@ The API docs will be available at:
 - `GET /api/projects` — List user's projects
 - `GET /api/projects/{project_id}` — Get project details
 
-### 🔍 Scans
-- `POST /api/scans` — Upload OpenAPI JSON/YAML spec and create queued scan
+### 🔍 Scans & Scanner Engine
+- `POST /api/scans` — Upload OpenAPI spec and create queued scan
 - `GET /api/scans` — List user's scans
 - `GET /api/scans/{scan_id}` — Get scan details and spec summary
 - `GET /api/scans/{scan_id}/status` — Polling status (progress, endpoints, tests, findings)
 - `GET /api/scans/{scan_id}/endpoints` — List discovered spec endpoints
 - `POST /api/scans/{scan_id}/start` — Initiate background scan execution
 - `POST /api/scans/{scan_id}/cancel` — Safely cancel a queued or running scan
+- `POST /api/scan/parse` — Spec normalization endpoint
+- `POST /api/scan/analyze-response` — BOPLA response exposure analyzer
 
 ### ⚡ Live WebSockets
 - `WS /ws/scans/{scan_id}` (or `WS /api/scans/{scan_id}/ws`) — Real-time progress & findings feed
@@ -165,13 +152,11 @@ curl -X POST http://localhost:8000/api/auth/register \
   -H "Content-Type: application/json" \
   -d '{"email": "engineer@sentinel.dev", "password": "SecurePassword123!"}'
 
-# Login to get JWT
+# Login to get JWT token
 curl -X POST http://localhost:8000/api/auth/login \
   -H "Content-Type: application/json" \
   -d '{"email": "engineer@sentinel.dev", "password": "SecurePassword123!"}'
 ```
-
-Save the `access_token` from the response for subsequent requests.
 
 ### 2. Create Project
 ```bash
@@ -181,63 +166,24 @@ curl -X POST http://localhost:8000/api/projects \
   -d '{"name": "E-Commerce API Test", "base_url": "http://localhost:9000"}'
 ```
 
-### 3. Upload OpenAPI Spec & Create Scan
+### 3. Upload Spec & Start Scan
 ```bash
+# Create Scan
 curl -X POST http://localhost:8000/api/scans \
   -H "Authorization: Bearer <TOKEN>" \
   -F "project_id=<PROJECT_ID>" \
-  -F "file=@petstore.json;type=application/json"
-```
+  -F "file=@spec.json;type=application/json"
 
-### 4. Start Scan Execution
-```bash
+# Start Scan
 curl -X POST http://localhost:8000/api/scans/<SCAN_ID>/start \
   -H "Authorization: Bearer <TOKEN>" \
   -H "Content-Type: application/json" \
-  -d '{"target_url": "http://localhost:9000", "identities": {"user_a": "token_user_a", "user_b": "token_user_b"}}'
+  -d '{"target_url": "http://localhost:9000", "identities": {"user_a": "token_a", "user_b": "token_b"}}'
 ```
-
-### 5. Check Scan Status
-```bash
-curl -X GET http://localhost:8000/api/scans/<SCAN_ID>/status \
-  -H "Authorization: Bearer <TOKEN>"
-```
-
-### 6. Cancel Scan
-```bash
-curl -X POST http://localhost:8000/api/scans/<SCAN_ID>/cancel \
-  -H "Authorization: Bearer <TOKEN>"
-```
-
----
-
-## 🤝 Internal Scanner Contract
-
-Backend sends execution payload to Scanner Engine:
-
-```json
-{
-  "scan_id": "8d33aee9-7502-4947-8ca0-655fd09c9d15",
-  "target_url": "http://localhost:9000",
-  "openapi_spec": {
-    "openapi": "3.0.3",
-    "info": { "title": "Mini Petstore", "version": "1.0.0" },
-    "paths": { ... }
-  },
-  "identities": {
-    "user_a": "Bearer eyJhbGciOi...",
-    "user_b": "Bearer eyJhbGciOi..."
-  }
-}
-```
-
-The Scanner Engine processes tests and streams back updates. The Backend maintains full ownership of database persistence.
 
 ---
 
 ## 📡 Frontend WebSocket Integration Guide
-
-Frontend clients can connect to `/ws/scans/{scan_id}` to receive real-time updates.
 
 ```javascript
 const scanId = "8d33aee9-7502-4947-8ca0-655fd09c9d15";
@@ -269,13 +215,4 @@ ws.onmessage = (event) => {
 
 ---
 
-## 🧪 Running Automated Tests
-
-Run the complete test suite:
-
-```bash
-cd backend
-.venv\Scripts\pytest.exe tests
-```
-
----
+> **Zero-Trust Security Disclaimer**: Only scan API targets and systems that you are explicitly authorized to test.
