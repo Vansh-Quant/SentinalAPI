@@ -305,21 +305,7 @@ class ScanManager:
                 db.add(finding)
                 db.flush()
                 evidence_data=item.get("evidence") or {}
-                Evidence(
-                    finding_id=finding.id,
-                    kind="http_exchange",
-                    request=str(evidence_data.get("attack_request",{})),
-                    response=str(evidence_data.get("attack_response",{})),
-                    original_request=str(evidence_data.get("baseline_request",{})),
-                    modified_request=str(evidence_data.get("attack_request",{})),
-                    original_response=str(evidence_data.get("baseline_response",{})),
-                    modified_response=str(evidence_data.get("attack_response",{})),
-                    poc_request=item.get("poc"),
-                    relevant_headers={"Authorization":"[REDACTED]"},
-                    relevant_response_fields=evidence_data.get("proof",{}),
-                    metadata_json={"source":"real_scanner_engine","identity":evidence_data.get("identity")},
-                )
-                db.add(db.new_instance(Evidence) if False else Evidence(
+                db.add(Evidence(
                     finding_id=finding.id,
                     kind="http_exchange",
                     request=str(evidence_data.get("attack_request",{})),
