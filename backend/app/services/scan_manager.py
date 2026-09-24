@@ -29,7 +29,7 @@ from app.services.scanner_client import (
     ScannerTimeoutError,
     is_sandboxed_url,
 )
-from app.services.security_sanitizer import sanitize_text
+from app.services.security_sanitizer import sanitize_dict, sanitize_text
 from app.services.ws_manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
@@ -299,7 +299,7 @@ class ScanManager:
                     remediation=item.get("remediation"),
                     status="open",
                     poc_request=item.get("poc"),
-                    detail=item.get("evidence",{}),
+                    detail=sanitize_dict(item.get("evidence",{})),
                     test_id=f"{item.get('type','TEST')}-{item.get('endpoint','unknown')}",
                 )
                 db.add(finding)
@@ -308,12 +308,12 @@ class ScanManager:
                 db.add(Evidence(
                     finding_id=finding.id,
                     kind="http_exchange",
-                    request=str(evidence_data.get("attack_request",{})),
-                    response=str(evidence_data.get("attack_response",{})),
-                    original_request=str(evidence_data.get("baseline_request",{})),
-                    modified_request=str(evidence_data.get("attack_request",{})),
-                    original_response=str(evidence_data.get("baseline_response",{})),
-                    modified_response=str(evidence_data.get("attack_response",{})),
+                    request=sanitize_text(str(evidence_data.get("attack_request",{}))),
+                    response=sanitize_text(str(sanitize_dict(evidence_data.get("attack_response",{})))),
+                    original_request=sanitize_text(str(evidence_data.get("baseline_request",{}))),
+                    modified_request=sanitize_text(str(evidence_data.get("attack_request",{}))),
+                    original_response=sanitize_text(str(sanitize_dict(evidence_data.get("baseline_response",{})))),
+                    modified_response=sanitize_text(str(sanitize_dict(evidence_data.get("attack_response",{})))),
                     poc_request=item.get("poc"),
                     relevant_headers={"Authorization":"[REDACTED]"},
                     relevant_response_fields=evidence_data.get("proof",{}),
