@@ -6,8 +6,12 @@ _ID = re.compile(r"\{([^}]+)\}")
 
 def scan_bola(base_url: str, endpoint_path: str, identity: Identity, own_id: str, other_id: str) -> Finding | None:
     executor = HttpExecutor()
-    own_path = endpoint_path.replace("{" + _ID.search(endpoint_path).group(1) + "}", own_id)
-    other_path = endpoint_path.replace("{" + _ID.search(endpoint_path).group(1) + "}", other_id)
+    match = _ID.search(endpoint_path)
+    if not match:
+        return None
+    param = match.group(1)
+    own_path = endpoint_path.replace("{" + param + "}", str(own_id))
+    other_path = endpoint_path.replace("{" + param + "}", str(other_id))
     baseline = executor.request(base_url, "GET", own_path, identity.token)
     attack = executor.request(base_url, "GET", other_path, identity.token)
     body = attack["body"]
@@ -21,7 +25,7 @@ def scan_bola(base_url: str, endpoint_path: str, identity: Identity, own_id: str
         attack_response=attack,
         proof={"cross_user_access": True, "requesting_identity": identity.name, "target_object": other_id},
     )
-    poc = f"curl -i -H 'Authorization: Bearer {identity.token}' '{base_url.rstrip('/')}{other_path}'"
+    poc = f"curl -i -H 'Authorization: Bearer $TOKEN' '{base_url.rstrip('/')}{other_path}'"
     return Finding("BOLA", endpoint_path, "HIGH", 0.99, "Broken Object Level Authorization", "An identity accessed an object belonging to another identity.", evidence, poc)
 
 def _contains_id(body, object_id: str) -> bool:
