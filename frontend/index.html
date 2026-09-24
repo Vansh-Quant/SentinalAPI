@@ -191,6 +191,7 @@ nav();document.getElementById('profileBtn')?.addEventListener('click',()=>go('pr
   const API_BASE = window.SENTINEL_API_BASE || 'http://127.0.0.1:8001';
   const state = window.sentinelState = window.sentinelState || {
     token: localStorage.getItem('sentinel_token') || '',
+    user: null,
     project: null,
     scan: null,
     findings: [],
@@ -216,6 +217,41 @@ nav();document.getElementById('profileBtn')?.addEventListener('click',()=>go('pr
     toast(error.message || String(error));
   }
 
+  async function loadCurrentUser() {
+    if (!state.token) return null;
+    try {
+      state.user = await request('/api/auth/me');
+      updateWorkspaceIdentity();
+      return state.user;
+    } catch (error) {
+      state.token = '';
+      state.user = null;
+      localStorage.removeItem('sentinel_token');
+      return null;
+    }
+  }
+
+  function updateWorkspaceIdentity() {
+    const email = state.user?.email || 'Not signed in';
+    const name = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
+    document.querySelectorAll('.user-btn b').forEach(element => { element.textContent = name; });
+    document.querySelectorAll('.user-btn small').forEach(element => { element.textContent = email; });
+    document.querySelectorAll('.user-btn .avatar').forEach(element => { element.textContent = name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase(); });
+  }
+
+  function applyWorkspaceTheme(mode) {
+    if (!['light', 'dark', 'system'].includes(mode)) return;
+    localStorage.setItem('sentinelapi-mode', mode);
+    const actual = mode === 'system' ? (matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light') : mode;
+    document.documentElement.dataset.theme = actual;
+    document.querySelectorAll('.modes button[data-mode]').forEach(button => button.classList.toggle('active', button.dataset.mode === mode));
+  }
+
+  document.addEventListener('click', event => {
+    const button = event.target.closest('.modes button[data-mode]');
+    if (button) { event.preventDefault(); applyWorkspaceTheme(button.dataset.mode); }
+  });
+
   function esc(value) {
     return String(value ?? '').replace(/[&<>"']/g, ch => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch]));
   }
@@ -231,6 +267,7 @@ nav();document.getElementById('profileBtn')?.addEventListener('click',()=>go('pr
       });
       state.token = body.access_token;
       localStorage.setItem('sentinel_token', state.token);
+      await loadCurrentUser();
       toast('Signed in successfully');
       setTimeout(() => go(loginDestination), 260);
     } catch (error) { showError(error); }
@@ -247,6 +284,7 @@ nav();document.getElementById('profileBtn')?.addEventListener('click',()=>go('pr
       });
       state.token = body.access_token;
       localStorage.setItem('sentinel_token', state.token);
+      await loadCurrentUser();
       toast('Account created successfully');
       setTimeout(() => go(loginDestination), 260);
     } catch (error) { showError(error); }
@@ -373,6 +411,12 @@ nav();document.getElementById('profileBtn')?.addEventListener('click',()=>go('pr
     if (!f) return head('investigation', 'Finding Investigation', 'Select a finding first.', '<button class="btn" onclick="go(\'findings\')">Back</button>');
     return head('investigation', 'Finding Investigation', esc(f.title), '<button class="btn" onclick="go(\'findings\')">← Back</button>') + `<div class="card">${pill(esc(f.severity))}<h2>${esc(f.title)}</h2><p>${esc(f.description)}</p><p><b>Confidence:</b> ${Math.round((f.confidence || 0) * 100)}%</p><p><b>Impact:</b> ${esc(f.impact)}</p><p><b>Remediation:</b> ${esc(f.remediation)}</p><h3>Evidence / PoC</h3><pre class="code">${esc(JSON.stringify(f.evidence || {poc_request:f.poc_request}, null, 2))}</pre></div>`;
   };
+  views.profile = function () {
+    const email = state.user?.email || 'Not signed in';
+    const name = email.split('@')[0].replace(/[._-]+/g, ' ').replace(/\b\w/g, ch => ch.toUpperCase());
+    const initials = name.split(' ').map(part => part[0]).join('').slice(0, 2).toUpperCase();
+    return head('profile', 'Profile', 'Manage your SentinelAPI account and workspace identity', '') + `<div class="grid two"><div class="card"><div class="section-title"><h3>Account</h3><span class="pill fixed">Active</span></div><div style="display:flex;align-items:center;gap:16px;margin-bottom:18px"><div class="avatar" style="width:68px;height:68px;font-size:22px">${esc(initials)}</div><div><h2 style="margin:0 0 4px">${esc(name)}</h2><div class="muted">${esc(email)}</div></div></div><div class="grid two"><div class="field"><label>Email</label><input value="${esc(email)}" readonly/></div><div class="field"><label>User ID</label><input value="${esc(state.user?.id || '')}" readonly/></div></div></div></div>`;
+  };
   views.report = function () {
     const page = head('report', 'Security Report', 'Generated from the selected backend scan.', '') + '<div class="card" id="backend-report"><p>Loading report...</p></div>';
     setTimeout(async () => {
@@ -388,9 +432,13 @@ nav();document.getElementById('profileBtn')?.addEventListener('click',()=>go('pr
   const originalGo = window.go;
   window.go = function (key) {
     originalGo(key);
+    updateWorkspaceIdentity();
     if (key === 'live') startLiveUpdates();
     if (key === 'findings') loadFindings().catch(showError);
   };
+  applyWorkspaceTheme(localStorage.getItem('sentinelapi-mode') || 'dark');
+  document.querySelectorAll('.modes button:not([data-mode])').forEach(button => { button.onclick = null; });
+  loadCurrentUser();
 })();
 </script>
 </body></html>
