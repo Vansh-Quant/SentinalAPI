@@ -1,6 +1,29 @@
+# SentinelAPI — full local development dependencies
+# Python 3.13 recommended for the current Windows development environment.
+
+# Web framework
 fastapi==0.115.12
 uvicorn[standard]==0.34.0
-httpx==0.28.1
+
+# Database
+sqlalchemy==2.0.36
+psycopg[binary]>=3.2.0
+
+# Validation / settings
 pydantic==2.11.3
+pydantic-settings>=2.5.0
+email-validator>=2.1.0
+
+# Uploads / parsing
+python-multipart>=0.0.9
 PyYAML==6.0.2
+
+# Authentication / security
+bcrypt>=4.2.0
+PyJWT>=2.9.0
+
+# HTTP client
+httpx==0.28.1
+
+# Tests
 pytest==8.3.5
