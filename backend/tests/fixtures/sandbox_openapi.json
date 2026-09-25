@@ -1,0 +1,184 @@
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "Vulnerable Sandbox Demo API",
+    "version": "1.0.0",
+    "description": "OpenAPI contract for the intentionally vulnerable sandbox. Response schemas document the INTENDED contract (public fields only), so live responses that include sensitive properties are genuine deviations the BOPLA engine should flag."
+  },
+  "servers": [
+    { "url": "http://127.0.0.1:8766" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "description": "Sandbox session token from POST /auth/login"
+      }
+    }
+  },
+  "paths": {
+    "/profile": {
+      "get": {
+        "operationId": "getProfile",
+        "summary": "Own profile (SECURE control: only own data, limited fields)",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Own profile",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "email": { "type": "string" },
+                    "role": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orders": {
+      "get": {
+        "operationId": "listOrders",
+        "summary": "Own orders (SECURE control: ownership filter)",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Only the caller's orders",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "integer" },
+                    "product_id": { "type": "integer" },
+                    "quantity": { "type": "integer" },
+                    "total_price": { "type": "number" },
+                    "status": { "type": "string" },
+                    "created_at": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/orders/{order_id}": {
+      "get": {
+        "operationId": "getOrder",
+        "summary": "Order by id (VULNERABLE: no ownership check)",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "order_id", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Order detail",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "integer" },
+                    "user_id": { "type": "integer" },
+                    "product_id": { "type": "integer" },
+                    "quantity": { "type": "integer" },
+                    "total_price": { "type": "number" },
+                    "status": { "type": "string" },
+                    "created_at": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users": {
+      "get": {
+        "operationId": "listUsers",
+        "summary": "User directory (VULNERABLE: excessive data when authenticated)",
+        "security": [{ "bearerAuth": [] }],
+        "responses": {
+          "200": {
+            "description": "Public user fields — the intended contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "email": { "type": "string" },
+                    "phone": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/users/{user_id}": {
+      "get": {
+        "operationId": "getUser",
+        "summary": "User by id (VULNERABLE: BOLA/IDOR + excessive data)",
+        "security": [{ "bearerAuth": [] }],
+        "parameters": [
+          { "name": "user_id", "in": "path", "required": true, "schema": { "type": "integer" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "Public user fields — the intended contract",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "email": { "type": "string" },
+                    "phone": { "type": "string" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/products": {
+      "get": {
+        "operationId": "listProducts",
+        "summary": "Public product catalog (SECURE control: no auth, no sensitive data)",
+        "responses": {
+          "200": {
+            "description": "Public products",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "id": { "type": "integer" },
+                    "name": { "type": "string" },
+                    "description": { "type": "string" },
+                    "price": { "type": "number" },
+                    "category": { "type": "string" },
+                    "stock": { "type": "integer" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

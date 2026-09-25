@@ -5,7 +5,9 @@ and fallback mock scanner execution for standalone/offline operation.
 """
 
 import asyncio
+import ipaddress
 import logging
+import socket
 from urllib.parse import urlparse
 
 import httpx
@@ -14,14 +16,15 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Allowed sandbox hosts/prefixes for Zero-Trust validation
+# Allowed sandbox hosts/prefixes for Zero-Trust validation.
+# Only the provisioned container/demo names are accepted here; generic names
+# (test-api, mock-api, ...) were removed so a stray DNS entry cannot become a
+# scan target.
 DEFAULT_ALLOWED_SANDBOX_HOSTS = {
     "localhost",
     "127.0.0.1",
     "::1",
     "sandbox",
-    "test-api",
-    "mock-api",
     "api-sandbox",
 }
 
@@ -50,10 +53,54 @@ class MalformedScannerResponseError(ScannerError):
     pass
 
 
+def _ip_is_sandbox(ip: str) -> bool:
+    """True when an IP address belongs to a private/loopback/link-local range."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return False
+    return (
+        addr.is_private
+        or addr.is_loopback
+        or addr.is_link_local
+        or addr.is_reserved
+        or addr.is_multicast
+        or addr.is_unspecified
+    )
+
+
+def _hostname_resolves_to_sandbox(hostname: str) -> tuple[bool, str]:
+    """Resolve a hostname and require EVERY address to be sandbox-range.
+
+    This closes the textual-allowlist bypass: '10.0.0.1.evil.com' or
+    '172.16.attacker.net' match the string prefixes but resolve to public
+    addresses, and public addresses are rejected here.
+    """
+    try:
+        infos = socket.getaddrinfo(hostname, None)
+    except OSError:
+        return False, f"Sandbox hostname '{hostname}' could not be resolved"
+    if not infos:
+        return False, f"Sandbox hostname '{hostname}' resolved to no addresses"
+    for info in infos:
+        ip = str(info[4][0])
+        if not _ip_is_sandbox(ip):
+            return False, (
+                f"Sandbox hostname '{hostname}' resolves to non-private address {ip}; "
+                "public internet targets are prohibited"
+            )
+    return True, ""
+
+
 def is_sandboxed_url(url: str) -> tuple[bool, str]:
     """Validate that the target URL belongs to an explicitly allowed sandbox environment.
 
-    Zero-Trust enforcement: arbitrary public internet targets are strictly prohibited.
+    Zero-Trust enforcement, in two layers:
+      1. The hostname must match the textual allowlist (exact names, internal
+         subnets, or the configured SANDBOX_BASE_URL host).
+      2. The hostname must actually resolve to private/loopback/link-local IP
+         addresses, defeating textual bypasses such as '10.0.0.1.evil.com'.
+    Arbitrary public internet targets are strictly prohibited.
     """
     if not url:
         return False, "Target URL is required"
@@ -66,18 +113,20 @@ def is_sandboxed_url(url: str) -> tuple[bool, str]:
     if parsed.scheme not in ("http", "https"):
         return False, f"Unsupported URL scheme '{parsed.scheme}'; only http and https are permitted"
 
+    if parsed.username or parsed.password:
+        return False, "Target URL must not embed credentials (userinfo)"
+
     hostname = (parsed.hostname or "").lower()
     if not hostname:
         return False, "Target URL must contain a valid hostname"
 
-    # Check configured sandbox base URL hostname
+    # Layer 1: textual allowlist (configured sandbox host included)
     sandbox_parsed = urlparse(settings.sandbox_base_url)
     allowed_hosts = set(DEFAULT_ALLOWED_SANDBOX_HOSTS)
     if sandbox_parsed.hostname:
         allowed_hosts.add(sandbox_parsed.hostname.lower())
 
-    # Allow localhost, 127.0.0.1, internal test subnets, or explicitly configured sandbox hosts
-    if (
+    textual_match = (
         hostname in allowed_hosts
         or hostname.endswith(".local")
         or hostname.endswith(".sandbox")
@@ -85,14 +134,38 @@ def is_sandboxed_url(url: str) -> tuple[bool, str]:
         or hostname.startswith("10.")
         or hostname.startswith("192.168.")
         or hostname.startswith("172.16.")
-    ):
-        return True, ""
-
-    return (
-        False,
-        f"Target URL '{url}' is outside permitted sandbox environment. "
-        "Zero-Trust Policy allows scanning only explicitly configured sandbox target APIs.",
     )
+    if not textual_match:
+        return (
+            False,
+            f"Target URL '{url}' is outside permitted sandbox environment. "
+            "Zero-Trust Policy allows scanning only explicitly configured sandbox target APIs.",
+        )
+
+    # Layer 2: resolved-IP verification (literal IPs are checked directly,
+    # hostnames go through DNS; every resolved address must be sandbox-range).
+    try:
+        ipaddress.ip_address(hostname)
+        return True, ""  # literal private-range IP already matched layer 1
+    except ValueError:
+        pass
+
+    ok, reason = _hostname_resolves_to_sandbox(hostname)
+    if not ok:
+        return False, reason
+    return True, ""
+
+
+def assert_target_still_sandboxed(url: str) -> None:
+    """Re-validate a target immediately before scan execution (request time).
+
+    Raises ScannerError when the stored target no longer satisfies the
+    Zero-Trust policy (defense in depth against TOCTOU drift between the
+    start request and the actual outbound scan traffic).
+    """
+    valid, reason = is_sandboxed_url(url)
+    if not valid:
+        raise ScannerError(f"Zero-Trust re-validation failed at execution time: {reason}")
 
 
 class ScannerClient:
@@ -130,7 +203,11 @@ class ScannerClient:
         last_error = None
         for attempt in range(1, self.max_retries + 1):
             try:
-                async with httpx.AsyncClient(timeout=self.timeout_seconds) as client:
+                # follow_redirects stays disabled: a scan request must never
+                # be silently forwarded to a host outside the sandbox policy.
+                async with httpx.AsyncClient(
+                    timeout=self.timeout_seconds, follow_redirects=False
+                ) as client:
                     resp = await client.post(endpoint, json=payload)
                     resp.raise_for_status()
 
@@ -143,7 +220,15 @@ class ScannerClient:
                     if not isinstance(data, dict):
                         raise MalformedScannerResponseError("Scanner payload must be a JSON object")
 
-                    logger.info("scanner response <- 200 OK for scan_id=%s payload=%s", scan_id, data)
+                    # Log a summary only — never the full payload, which can
+                    # contain evidence excerpts with embedded credentials.
+                    findings = data.get("findings")
+                    logger.info(
+                        "scanner response <- 200 OK for scan_id=%s status=%s findings=%s",
+                        scan_id,
+                        data.get("status"),
+                        len(findings) if isinstance(findings, list) else "n/a",
+                    )
                     return data
 
             except httpx.TimeoutException as exc:

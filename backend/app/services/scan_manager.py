@@ -28,12 +28,29 @@ from app.services.scanner_client import (
     ScannerConnectionError,
     ScannerError,
     ScannerTimeoutError,
+    assert_target_still_sandboxed,
     is_sandboxed_url,
 )
 from app.services.security_sanitizer import sanitize_dict, sanitize_text
 from app.services.ws_manager import manager as ws_manager
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_int(value: object, default: int = 0) -> int:
+    """Coerce an external scanner field to int without crashing the run."""
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _safe_float(value: object, default: float = 0.0) -> float:
+    """Coerce an external scanner field to float without crashing the run."""
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
 
 
 def record_scan_event(
@@ -83,6 +100,13 @@ class ScanManager:
 
             if scan.status == "running" or self.is_running(sid_str):
                 raise ValueError("Scan is already running")
+            if scan.status in ("completed", "failed", "cancelled"):
+                # Terminal states are final: restarting would append a second
+                # set of findings to the same scan and double-count results.
+                raise ValueError(
+                    f"Scan is already '{scan.status}' and cannot be restarted; "
+                    "create a new scan for a fresh run"
+                )
 
             # Determine target sandbox URL
             resolved_target = target_url
@@ -211,6 +235,11 @@ class ScanManager:
                 },
             )
 
+            # Request-time re-validation: the Zero-Trust policy is enforced
+            # again immediately before any scanner traffic leaves the process
+            # (defense against drift between the start request and execution).
+            assert_target_still_sandboxed(target_url)
+
             # 2. Load spec and endpoints from DB
             with session_factory() as db:
                 scan = db.get(Scan, scan_id)
@@ -255,7 +284,10 @@ class ScanManager:
             logger.info("scan task cancelled during execution scan_id=%s", sid_str)
             with session_factory() as db:
                 scan = db.get(Scan, scan_id)
-                if scan:
+                # Never overwrite a terminal status: if the scan completed
+                # naturally while the cancel request was in flight, the
+                # completed state wins.
+                if scan and scan.status not in ("completed", "failed", "cancelled"):
                     scan.status = "cancelled"
                     db.commit()
             raise
@@ -334,7 +366,7 @@ class ScanManager:
                             description=f"Detected {finding_type} vulnerability at {endpoint.method} {endpoint.path}.",
                             impact="An attacker could access or expose data outside the intended authorization boundary.",
                             remediation="Implement and verify strict server-side authorization and response filtering.",
-                            status="open", poc_request=poc, test_id=f"TEST-{finding_type}-{completed}",
+                            status="open", poc_request=sanitize_text(poc), test_id=f"TEST-{finding_type}-{completed}",
                             detail={"target_url": target_url, "method": endpoint.method, "path": endpoint.path},
                         )
                         db.add(finding)
@@ -344,10 +376,11 @@ class ScanManager:
                             response='HTTP/1.1 200 OK\\r\\n\\r\\n{"vulnerable": true}',
                             original_request=poc, modified_request=poc,
                             original_response='HTTP/1.1 200 OK', modified_response='HTTP/1.1 200 OK',
-                            poc_request=poc, relevant_headers={"Authorization": "Bearer [REDACTED]"},
+                            poc_request=sanitize_text(poc), relevant_headers={"Authorization": "Bearer [REDACTED]"},
                             relevant_response_fields={"vulnerable": True}, metadata_json={"source": "local_demo_engine"},
                         ))
                         db.commit()
+                        await self._broadcast_finding(str(scan_id), finding)
 
         with session_factory() as db:
             scan = db.get(Scan, scan_id)
@@ -373,30 +406,46 @@ class ScanManager:
         endpoints: list[Endpoint],
         session_factory: sessionmaker,
     ) -> None:
-        findings = result.get("findings", [])
+        """Persist an external scanner result.
+
+        Each finding is committed individually so verified results survive a
+        later failure in the loop (documented behavior). Malformed scalar
+        fields are coerced defensively instead of crashing the run, every
+        persisted string passes through the sanitizer, and each persisted
+        finding is broadcast as the documented `finding` WebSocket event.
+        """
+        raw_findings = result.get("findings", [])
+        findings: list[dict] = raw_findings if isinstance(raw_findings, list) else []
         endpoint_map = {(e.method.upper(), e.path): e for e in endpoints}
         with session_factory() as db:
             for item in findings:
+                if not isinstance(item, dict):
+                    logger.warning(
+                        "scanner finding skipped for scan_id=%s: entry is not an object", scan_id
+                    )
+                    continue
+                evidence_data = item.get("evidence") or {}
+                if not isinstance(evidence_data, dict):
+                    evidence_data = {}
                 ep = endpoint_map.get((str(item.get("method","GET")).upper(), item.get("endpoint")))
                 finding = Finding(
                     scan_id=scan_id,
                     endpoint_id=ep.id if ep else None,
-                    type=item.get("type","UNKNOWN"),
-                    title=item.get("title","Security finding"),
-                    severity=item.get("severity","INFO"),
-                    confidence=float(item.get("confidence",0.0)),
-                    category=item.get("category","security"),
-                    description=item.get("description"),
-                    impact=item.get("impact"),
-                    remediation=item.get("remediation"),
+                    type=str(item.get("type","UNKNOWN")),
+                    title=sanitize_text(str(item.get("title","Security finding"))) or "Security finding",
+                    severity=str(item.get("severity","INFO")),
+                    confidence=_safe_float(item.get("confidence", 0.0)),
+                    category=str(item.get("category","security")),
+                    description=sanitize_text(item.get("description")),
+                    impact=sanitize_text(item.get("impact")),
+                    remediation=sanitize_text(item.get("remediation")),
                     status="open",
-                    poc_request=item.get("poc"),
-                    detail=sanitize_dict(item.get("evidence",{})),
+                    poc_request=sanitize_text(item.get("poc")),
+                    detail=sanitize_dict(evidence_data),
                     test_id=f"{item.get('type','TEST')}-{item.get('endpoint','unknown')}",
                 )
                 db.add(finding)
                 db.flush()
-                evidence_data=item.get("evidence") or {}
                 db.add(Evidence(
                     finding_id=finding.id,
                     kind="http_exchange",
@@ -406,21 +455,43 @@ class ScanManager:
                     modified_request=sanitize_text(str(evidence_data.get("attack_request",{}))),
                     original_response=sanitize_text(str(sanitize_dict(evidence_data.get("baseline_response",{})))),
                     modified_response=sanitize_text(str(sanitize_dict(evidence_data.get("attack_response",{})))),
-                    poc_request=item.get("poc"),
+                    poc_request=sanitize_text(item.get("poc")),
                     relevant_headers={"Authorization":"[REDACTED]"},
-                    relevant_response_fields=evidence_data.get("proof",{}),
+                    relevant_response_fields=sanitize_dict(evidence_data.get("proof",{})),
                     metadata_json={"source":"real_scanner_engine","identity":evidence_data.get("identity")},
                 ))
+                db.commit()
+                await self._broadcast_finding(str(scan_id), finding)
             scan=db.get(Scan,scan_id)
             if scan:
                 scan.status="completed"; scan.progress=100.0
-                scan.endpoints_discovered=int(result.get("endpoints_discovered",len(endpoints)))
-                scan.tests_run=int(result.get("tests_run",0))
+                scan.endpoints_discovered=_safe_int(result.get("endpoints_discovered"), len(endpoints))
+                scan.tests_run=_safe_int(result.get("tests_run"), 0)
                 scan.tests_completed=scan.tests_run
                 scan.tests_generated=scan.tests_run
                 scan.completed_at=datetime.now(timezone.utc)
             db.commit()
             record_scan_event(db,scan_id,"scan_completed",f"Real scanner completed with {len(findings)} verified findings")
+
+    async def _broadcast_finding(self, scan_id: str, finding: Finding) -> None:
+        """Broadcast the documented `finding` WebSocket event after persistence."""
+        await ws_manager.broadcast_to_scan(
+            scan_id,
+            {
+                "type": "finding",
+                "scan_id": scan_id,
+                "finding": {
+                    "id": str(finding.id),
+                    "scan_id": str(finding.scan_id),
+                    "endpoint_id": str(finding.endpoint_id) if finding.endpoint_id else None,
+                    "type": finding.type,
+                    "title": finding.title,
+                    "severity": finding.severity,
+                    "confidence": finding.confidence,
+                    "status": finding.status,
+                },
+            },
+        )
 
 
 scan_manager = ScanManager()

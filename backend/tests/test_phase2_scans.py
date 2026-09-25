@@ -190,7 +190,117 @@ def test_scanner_client_malformed_response():
 
 
 def test_websocket_scan_updates(client: TestClient):
-    """Test WebSocket connection at /ws/scans/{scan_id}."""
-    scan_id = "test-scan-ws-123"
-    with client.websocket_connect(f"/ws/scans/{scan_id}") as websocket:
+    """Authenticated WebSocket connection at /ws/scans/{scan_id} for an owned scan."""
+    headers = auth_headers(client)
+    project = make_project(client, headers)
+    scan = _create_scan(client, headers, project["id"])
+    token = headers["Authorization"].split(" ", 1)[1]
+
+    with client.websocket_connect(
+        f"/ws/scans/{scan['id']}", subprotocols=["bearer", token]
+    ) as websocket:
         websocket.send_text("ping")
+
+
+def test_websocket_requires_auth(client: TestClient):
+    """Unauthenticated WebSocket subscriptions are rejected before accept."""
+    from starlette.websockets import WebSocketDisconnect
+
+    headers = auth_headers(client)
+    project = make_project(client, headers)
+    scan = _create_scan(client, headers, project["id"])
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(f"/ws/scans/{scan['id']}"):
+            pass
+
+
+def test_websocket_rejects_foreign_scan(client: TestClient, other_user_headers: dict):
+    """A user cannot subscribe to another user's scan WebSocket feed."""
+    from starlette.websockets import WebSocketDisconnect
+
+    headers = auth_headers(client)
+    project = make_project(client, headers)
+    scan = _create_scan(client, headers, project["id"])
+    other_token = other_user_headers["Authorization"].split(" ", 1)[1]
+
+    with pytest.raises(WebSocketDisconnect):
+        with client.websocket_connect(
+            f"/ws/scans/{scan['id']}", subprotocols=["bearer", other_token]
+        ):
+            pass
+
+
+def test_ws_finding_event_broadcast(client: TestClient):
+    """Persisting a finding broadcasts the documented `finding` WS event."""
+    from unittest.mock import AsyncMock
+
+    headers = auth_headers(client)
+    project = make_project(client, headers)
+    scan = _create_scan(client, headers, project["id"])
+
+    with patch(
+        "app.services.scan_manager.ScannerClient.start_scan_job",
+        side_effect=ScannerConnectionError("offline"),
+    ):
+        with patch(
+            "app.services.scan_manager.ws_manager.broadcast_to_scan", new_callable=AsyncMock
+        ) as mock_broadcast:
+            r = client.post(
+                f"/api/scans/{scan['id']}/start",
+                json={"target_url": "http://localhost:9000"},
+                headers=headers,
+            )
+            assert r.status_code == 200, r.text
+
+    types = {call.args[1].get("type") for call in mock_broadcast.await_args_list}
+    assert "finding" in types, f"expected a finding event, got types={types}"
+    finding_event = next(
+        call.args[1] for call in mock_broadcast.await_args_list if call.args[1].get("type") == "finding"
+    )
+    assert finding_event["finding"]["type"] in ("BOLA", "EXCESSIVE_DATA_EXPOSURE", "RATE_LIMITING")
+    assert finding_event["scan_id"] == scan["id"]
+
+
+def test_start_completed_scan_rejected(client: TestClient):
+    """Terminal scans cannot be restarted (would duplicate findings)."""
+    headers = auth_headers(client)
+    project = make_project(client, headers)
+    scan = _create_scan(client, headers, project["id"])
+
+    with patch(
+        "app.services.scan_manager.ScannerClient.start_scan_job",
+        side_effect=ScannerConnectionError("offline"),
+    ):
+        r = client.post(f"/api/scans/{scan['id']}/start", headers=headers)
+        assert r.status_code == 200
+
+        # First start completes the scan via the local engine.
+        st = client.get(f"/api/scans/{scan['id']}/status", headers=headers).json()
+        assert st["status"] in ("running", "completed")
+
+        # A restart attempt on the finished scan must fail.
+        r2 = client.post(f"/api/scans/{scan['id']}/start", headers=headers)
+        assert r2.status_code == 400
+        assert "cannot be restarted" in r2.json()["detail"]
+
+
+def test_is_sandboxed_url_rejects_hostile_resolutions():
+    """Textual private-range lookalikes must not validate once resolved."""
+    from app.services.scanner_client import is_sandboxed_url
+
+    # A name that string-matches the 10.x prefix but cannot be a sandbox:
+    # either it resolves to a public address or it does not resolve at all.
+    valid, _reason = is_sandboxed_url("http://10.0.0.1.nonexistent.invalid")
+    assert valid is False
+
+    # Literal private IPs and localhost still validate (offline-safe).
+    valid, _ = is_sandboxed_url("http://127.0.0.1:9000")
+    assert valid is True
+    valid, _ = is_sandboxed_url("http://localhost:9000")
+    assert valid is True
+
+    # Userinfo injection is refused.
+    valid, reason = is_sandboxed_url("http://user:pass@localhost:9000")
+    assert valid is False
+    assert "userinfo" in reason

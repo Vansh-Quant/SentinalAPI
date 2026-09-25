@@ -719,7 +719,13 @@
     if (state.scan && window.WebSocket) {
       try {
         const wsBase = API_BASE.replace(/^http/, 'ws');
-        state.socket = new WebSocket(wsBase + '/ws/scans/' + encodeURIComponent(state.scan));
+        // Auth: token rides the sub-protocol (browser WS cannot set headers).
+        // The server closes with 1008/4404 when auth/ownership fails; the
+        // 1s status poll remains authoritative either way.
+        state.socket = new WebSocket(
+          wsBase + '/ws/scans/' + encodeURIComponent(state.scan),
+          ['bearer', state.token]
+        );
         state.socket.onmessage = () => renderLiveStatus();
         state.socket.onerror = () => { try { state.socket.close(); } catch (_) { /* polling remains */ } };
       } catch (_) { /* polling remains authoritative */ }
@@ -998,3 +1004,238 @@
       return;
     }
     const preview = $('#report-preview');
+    if (!preview) return;
+    const sev = r.vulnerability_summary || { critical: 0, high: 0, medium: 0, low: 0 };
+    const meta = r.scan_metadata || {};
+    preview.innerHTML =
+      '<div class="section-title"><h3>' + esc(r.title || 'API Vulnerability Report') + '</h3>' + pill(statusClass(r.scan_status), r.scan_status || '') + '</div>' +
+      '<div class="current-list"><div>' + severityPill(r.security_score >= 80 ? 'LOW' : r.security_score >= 50 ? 'MEDIUM' : 'HIGH') + ' Security score <b>' + esc(r.security_score) + ' / 100</b></div>' +
+      '<div>◉ OpenAPI version: ' + esc(meta.openapi_version || r.openapi_version || '—') + '</div>' +
+      '<div>◉ Target: ' + esc(meta.target_url || 'not recorded') + '</div>' +
+      '<div>◉ Endpoints discovered: ' + esc(meta.endpoints_discovered != null ? meta.endpoints_discovered : '—') + ' · Tests completed: ' + esc(meta.tests_completed != null ? meta.tests_completed : '—') + '</div>' +
+      (r.scan_duration != null ? '<div>◉ Duration: ' + esc(r.scan_duration + 's') + '</div>' : '') + '</div>' +
+      '<div class="impact" style="margin-top:14px"><b>Executive summary</b><br>' + esc(r.executive_summary || '') + '</div>';
+    const recEl = $('#report-recommendations');
+    if (recEl) {
+      recEl.innerHTML = '<div class="section-title"><h3>Recommendations</h3></div>' +
+        (Array.isArray(r.recommendations) && r.recommendations.length
+          ? r.recommendations.map((rec) => '<div class="checkrow"><div class="checkmark">→</div>' + esc(rec) + '</div>').join('')
+          : '<p class="muted">No recommendations recorded.</p>');
+    }
+    const contentsEl = $('#report-contents');
+    if (contentsEl) {
+      const rows = Array.isArray(r.findings) ? r.findings : [];
+      contentsEl.innerHTML = '<div class="section-title"><h3>Findings (' + esc(r.severity_counts ? Object.values(r.severity_counts).reduce((a, b) => a + Number(b || 0), 0) : rows.length) + ')</h3></div>' +
+        '<div class="current-list">' +
+        '<div>' + severityPill('CRITICAL') + ' <span>' + (r.severity_counts ? r.severity_counts.critical : sev.critical) + '</span></div>' +
+        '<div>' + severityPill('HIGH') + ' <span>' + (r.severity_counts ? r.severity_counts.high : sev.high) + '</span></div>' +
+        '<div>' + severityPill('MEDIUM') + ' <span>' + (r.severity_counts ? r.severity_counts.medium : sev.medium) + '</span></div>' +
+        '<div>' + severityPill('LOW') + ' <span>' + (r.severity_counts ? r.severity_counts.low : sev.low) + '</span></div>' +
+        '</div>' +
+        (rows.length
+          ? '<div style="margin-top:12px;display:flex;flex-direction:column;gap:6px">' + rows.map((f) =>
+              '<div class="finding">' + severityPill(f.severity) + '<div><b>' + esc(f.title) + '</b><small class="muted">' +
+              esc(f.endpoint ? (f.endpoint.method + ' ' + f.endpoint.path) : (f.type || '')) + '</small></div></div>').join('') + '</div>'
+          : '');
+    }
+  }
+  views.report = { render: renderReport, after: loadReport };
+
+  // Minimal client-side PDF generator: builds a real application/pdf from the
+  // report data (no server-side PDF endpoint exists — documented limitation).
+  function pdfEscape(text) {
+    return String(text == null ? '' : text).replace(/\\/g, '\\\\').replace(/\(/g, '\\(').replace(/\)/g, '\\)');
+  }
+
+  function buildPdf(lines) {
+    const pageW = 595, pageH = 842, margin = 56, lineH = 14, maxLines = Math.floor((pageH - 2 * margin) / lineH);
+    const pages = [];
+    for (let i = 0; i < lines.length; i += maxLines) pages.push(lines.slice(i, i + maxLines));
+    if (!pages.length) pages.push(['(empty report)']);
+    const objects = [];
+    const pageObjNums = [];
+    const contentNums = [];
+    const firstPageObj = 4;
+    pages.forEach((_, idx) => {
+      pageObjNums.push(firstPageObj + idx * 2);
+      contentNums.push(firstPageObj + idx * 2 + 1);
+    });
+    objects[1] = '<< /Type /Catalog /Pages 2 0 R >>';
+    objects[2] = '<< /Type /Pages /Kids [' + pageObjNums.map((n) => n + ' 0 R').join(' ') + '] /Count ' + pages.length + ' >>';
+    objects[3] = '<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>';
+    pages.forEach((pageLines, idx) => {
+      let stream = 'BT /F1 11 Tf ' + margin + ' ' + (pageH - margin) + ' Td ' + (lineH + 2) + ' TL\n';
+      pageLines.forEach((line) => { stream += '(' + pdfEscape(line) + ') Tj T*\n'; });
+      stream += 'ET';
+      objects[pageObjNums[idx]] = '<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ' + pageW + ' ' + pageH + '] /Resources << /Font << /F1 3 0 R >> >> /Contents ' + contentNums[idx] + ' 0 R >>';
+      objects[contentNums[idx]] = { stream: stream };
+    });
+    let pdf = '%PDF-1.4\n';
+    const offsets = [];
+    for (let i = 1; i < objects.length; i += 1) {
+      offsets[i] = pdf.length;
+      const obj = objects[i];
+      if (typeof obj === 'string') {
+        pdf += i + ' 0 obj\n' + obj + '\nendobj\n';
+      } else {
+        const bytes = new TextEncoder().encode(obj.stream);
+        pdf += i + ' 0 obj\n<< /Length ' + bytes.length + ' >>\nstream\n' + obj.stream + '\nendstream\nendobj\n';
+      }
+    }
+    const xrefPos = pdf.length;
+    pdf += 'xref\n0 ' + objects.length + '\n0000000000 65535 f \n';
+    for (let i = 1; i < objects.length; i += 1) {
+      pdf += String(offsets[i]).padStart(10, '0') + ' 00000 n \n';
+    }
+    pdf += 'trailer\n<< /Size ' + objects.length + ' /Root 1 0 R >>\nstartxref\n' + xrefPos + '\n%%EOF';
+    return new Blob([pdf], { type: 'application/pdf' });
+  }
+
+  window.downloadReport = function () {
+    const r = state.report;
+    if (!r) { toast('Load the report first', true); return; }
+    const lines = [
+      'SentinelAPI - API Vulnerability Report',
+      'Title: ' + (r.title || ''),
+      'Scan status: ' + (r.scan_status || '') + '   Security score: ' + (r.security_score != null ? r.security_score + '/100' : 'n/a'),
+      'Scan ID: ' + String(r.scan_id || ''),
+      '',
+      'Executive summary:',
+      r.executive_summary || '',
+      '',
+      'Findings severity: critical=' + (r.severity_counts ? r.severity_counts.critical : '') +
+        '  high=' + (r.severity_counts ? r.severity_counts.high : '') +
+        '  medium=' + (r.severity_counts ? r.severity_counts.medium : '') +
+        '  low=' + (r.severity_counts ? r.severity_counts.low : ''),
+      '',
+      'Recommendations:',
+    ];
+    (r.recommendations || []).forEach((rec, i) => lines.push((i + 1) + '. ' + rec));
+    lines.push('', 'Findings:');
+    (r.findings || []).forEach((f) => {
+      lines.push('- [' + (f.severity || '') + '] ' + (f.title || '') + (f.endpoint ? ' (' + f.endpoint.method + ' ' + f.endpoint.path + ')' : ''));
+    });
+    const blob = buildPdf(lines);
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = 'sentinelapi-report-' + String(r.scan_id || 'scan').slice(0, 8) + '.pdf';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1500);
+    toast('Report PDF downloaded');
+  };
+
+  window.shareReport = async function () {
+    if (!state.scan) { toast('No scan selected', true); return; }
+    const url = API_BASE + '/api/scans/' + encodeURIComponent(state.scan) + '/report';
+    try {
+      if (navigator.share) { await navigator.share({ title: 'SentinelAPI Report', url: url }); return; }
+      await navigator.clipboard.writeText(url);
+      toast('Report API URL copied to clipboard');
+    } catch (_) {
+      toast(url, true);
+    }
+  };
+
+  // ------------------------------------------------------------- profile view
+  function renderProfile() {
+    const u = state.user;
+    return head('Profile', 'Your SentinelAPI account identity.',
+      '<button class="btn" onclick="go(\'overview\')">Overview</button>') +
+      '<div class="scan-config"><div class="card">' +
+      '<div class="section-title"><h3>Account</h3><span class="pill good">read-only</span></div>' +
+      '<div class="current-list">' +
+      '<div>◉ Email <b>' + esc(u ? u.email : '—') + '</b></div>' +
+      '<div>◉ User ID <b style="font-size:12px">' + esc(u ? u.id : '—') + '</b></div>' +
+      '<div>◉ Status <b>' + (u && u.is_active ? 'active' : 'inactive') + '</b></div>' +
+      (u && u.created_at ? '<div>◉ Member since ' + esc(fmtDate(u.created_at)) + '</div>' : '') +
+      '</div>' +
+      '<p class="muted" style="margin-top:12px;font-size:13px">The backend exposes no profile-update endpoint, so this view is read-only by design.</p>' +
+      '</div>' +
+      '<div class="card profile"><div class="section-title"><h3>Session</h3></div>' +
+      '<button class="btn danger" onclick="signOut()">Sign out</button>' +
+      '<p class="muted" style="margin-top:10px;font-size:13px">Signing out clears the local token and returns you to the landing page.</p>' +
+      '</div></div>';
+  }
+  views.profile = { render: renderProfile };
+
+  // ------------------------------------------------------------ settings view
+  function renderSettings() {
+    return head('Settings', 'Workspace appearance and session controls.', '') +
+      '<div class="scan-config"><div class="card">' +
+      '<div class="section-title"><h3>Appearance</h3></div>' +
+      '<div class="modes" style="gap:8px">' +
+      '<button type="button" data-mode="light">☀ Light</button>' +
+      '<button type="button" data-mode="dark">◐ Dark</button>' +
+      '<button type="button" data-mode="system">Auto</button>' +
+      '</div>' +
+      '<p class="muted" style="margin-top:10px;font-size:13px">Theme preference is stored locally; Auto follows your operating system.</p>' +
+      '</div>' +
+      '<div class="card profile"><div class="section-title"><h3>Connection</h3><span class="muted">backend API</span></div>' +
+      '<div class="code">' + esc(API_BASE) + '</div>' +
+      '<p class="muted" style="margin-top:10px;font-size:13px">The frontend talks to its own origin by default. Set <code>window.SENTINEL_API_BASE</code> before app.js loads to override.</p>' +
+      '<div style="margin-top:14px"><button class="btn danger" onclick="signOut()">Sign out</button></div>' +
+      '</div></div>';
+  }
+  views.settings = { render: renderSettings };
+
+  window.signOut = function () {
+    signOutLocal();
+    toast('Signed out');
+    go('landing');
+  };
+
+  // ------------------------------------------------------------- global search
+  window.performSearch = function (rawQuery) {
+    const q = String(rawQuery || '').trim().toLowerCase();
+    if (!q) return;
+    const finding = state.findings.find((f) => findingMatches(f, q))
+      || (state.finding && findingMatches(state.finding, q) ? state.finding : null);
+    if (finding) { state.finding = finding; go('investigation'); return; }
+    const scan = state.scans.find((s) => String(s.id).toLowerCase().indexOf(q) >= 0 || String(s.title || '').toLowerCase().indexOf(q) >= 0);
+    if (scan) { state.scan = scan.id; localStorage.setItem(SCAN_KEY, state.scan); go('live'); return; }
+    const project = state.projects.find((p) => String(p.name || '').toLowerCase().indexOf(q) >= 0);
+    if (project) { state.project = project.id; go('config'); return; }
+    toast('No match for "' + rawQuery + '" in loaded workspace data', true);
+  };
+
+  // ------------------------------------------------------------------ boot
+  function boot() {
+    applyTheme(localStorage.getItem(MODE_KEY) || 'dark');
+    buildNav();
+    toggleDrawer(false);
+
+    $('#nav-toggle').addEventListener('click', () => toggleDrawer());
+    $('#sidebar-overlay').addEventListener('click', closeDrawer);
+    $('#profile-btn').addEventListener('click', () => go('profile'));
+
+    const searchEl = $('#search');
+    if (searchEl) {
+      searchEl.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') { e.preventDefault(); performSearch(searchEl.value); }
+      });
+    }
+
+    // Delegated: theme buttons also exist inside re-rendered views (settings).
+    document.addEventListener('click', (e) => {
+      const btn = e.target && e.target.closest ? e.target.closest('.modes button[data-mode]') : null;
+      if (btn) applyTheme(btn.dataset.mode);
+    });
+    window.matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+      if ((localStorage.getItem(MODE_KEY) || 'dark') === 'system') applyTheme('system');
+    });
+
+    const initial = (location.hash || '').replace('#', '');
+    go(views[initial] ? initial : (state.token ? 'overview' : 'landing'));
+    if (state.token) {
+      apiRequest('/api/auth/me')
+        .then((user) => { state.user = user; syncIdentity(); })
+        .catch(() => { if (state.token) { signOutLocal(); } });
+    }
+  }
+
+  if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+  else boot();
+})();

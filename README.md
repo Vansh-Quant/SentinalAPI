@@ -165,7 +165,7 @@ the sandbox is at `http://localhost:9000`.
 ### 🐛 Findings & Evidence (Phase 3)
 - `GET /api/scans/{scan_id}/findings` — Filterable findings list (by `severity`, `type`, `status`) with pagination (`?page=1&limit=20`)
 - `GET /api/findings/{finding_id}` — Get detailed finding object with sanitized evidence & cURL PoC
-- `PATCH /api/findings/{finding_id}` — Update finding status (`open`, `resolved`, `false_positive`, `in_review`)
+- `PATCH /api/findings/{finding_id}` — Update finding status (`open`, `resolved`, `false_positive`, `in_review`, `mitigated`)
 
 ### 📊 Dashboard & Attack Surface (Phase 3)
 - `GET /api/scans/{scan_id}/dashboard` — Security score, severity breakdown (`critical`, `high`, `medium`, `low`), scan duration
@@ -176,7 +176,7 @@ the sandbox is at `http://localhost:9000`.
 - `GET /api/scans/{scan_id}/report` — Comprehensive executive vulnerability report
 
 ### ⚡ Live WebSockets
-- `WS /ws/scans/{scan_id}` (or `WS /api/scans/{scan_id}/ws`) — Real-time progress & findings feed
+- `WS /ws/scans/{scan_id}` (or `WS /api/scans/{scan_id}/ws`) — Real-time progress & findings feed (authenticated; see contract below)
 
 ---
 
@@ -248,7 +248,9 @@ curl -X GET http://localhost:8000/api/scans/<SCAN_ID>/report \
 
 ```javascript
 const scanId = "8d33aee9-7502-4947-8ca0-655fd09c9d15";
-const ws = new WebSocket(`ws://localhost:8000/ws/scans/${scanId}`);
+// WebSocket auth: browsers cannot set Authorization headers on new WebSocket(),
+// so the JWT rides the requested sub-protocol as ["bearer", <token>].
+const ws = new WebSocket(`ws://localhost:8000/ws/scans/${scanId}`, ["bearer", token]);
 
 ws.onmessage = (event) => {
   const data = JSON.parse(event.data);
@@ -291,10 +293,23 @@ hosts are rejected by the zero-trust sandbox policy.
 
 ## WebSocket contract
 
-Connect to `WS /ws/scans/{scan_id}` or `/api/scans/{scan_id}/ws`. Events have
-`type` values `status`, `progress`, `finding`, `completed`, or `error`.
-After a disconnect, reconnect and use `/api/scans/{scan_id}/status` as the
+Connect to `WS /ws/scans/{scan_id}` or `/api/scans/{scan_id}/ws`. Connections
+are authenticated: pass the JWT as the sub-protocol `["bearer", token]`
+(browsers) or `?token=<JWT>` (non-browser clients). Non-owners are closed with
+1008 (auth) or 4404 (scan not found / not owned) before the socket is
+accepted. Events have `type` values `status`, `progress`, `finding`,
+`completed`, or `error`; a `finding` event is emitted for every persisted
+finding on both the local engine and the external scanner path. After a
+disconnect, reconnect and use `/api/scans/{scan_id}/status` as the
 authoritative state.
+
+## Scan lifecycle rules
+
+Terminal states are final: `completed`, `failed`, and `cancelled` scans cannot
+be restarted (restarting would append duplicate findings). Create a new scan
+for a fresh run. The Zero-Trust target policy is enforced twice: when the scan
+is queued, and again immediately before the scanner executes (and the scanner
+engine itself refuses targets that resolve to public addresses).
 
 ## Database summary
 

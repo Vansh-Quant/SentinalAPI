@@ -11,6 +11,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from app.api import api_router
+from app.api.deps import require_scan_access_ws
 from app.core.config import settings
 from app.core.database import init_db
 
@@ -68,6 +69,8 @@ async def root_websocket_scan_updates(websocket: WebSocket, scan_id: str):
     """Direct WebSocket endpoint at /ws/scans/{scan_id} for live scan updates."""
     from app.services.ws_manager import manager as ws_manager
 
+    # Zero-Trust parity with REST: only the scan owner may subscribe.
+    require_scan_access_ws(websocket, scan_id)
     await ws_manager.connect(scan_id, websocket)
     try:
         while True:

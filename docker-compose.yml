@@ -41,11 +41,18 @@ services:
       timeout: 5s
       retries: 10
 
-  # Optional external scanner contract. The backend falls back to its local
-  # deterministic engine when this service is not available.
+  # External scanner engine implementing the documented contract
+  # (POST /scan/start, POST /scan/{scan_id}/cancel). Running the real engine
+  # (scanner/service.py) instead of a no-op placeholder: an nginx placeholder
+  # answered 404s, which the backend treats as a hard scanner error rather
+  # than an outage, so out-of-box scans failed instead of using the
+  # deterministic local fallback. Stop this service to reproduce outage
+  # fallback behavior (connection refused -> local engine).
   scanner:
-    image: nginx:alpine
-    container_name: sentinel-scanner-placeholder
+    build: .
+    container_name: sentinel-scanner
+    working_dir: /app
+    command: ["uvicorn", "scanner.service:app", "--host", "0.0.0.0", "--port", "9100"]
     expose:
       - "9100"
 

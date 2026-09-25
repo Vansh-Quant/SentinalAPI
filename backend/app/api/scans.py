@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from sqlalchemy import func, select
 
-from app.api.deps import CurrentUser, DbSession
+from app.api.deps import CurrentUser, DbSession, require_scan_access_ws
 from app.models.endpoint import Endpoint
 from app.models.finding import Finding
 from app.models.scan import Scan
@@ -228,6 +228,8 @@ def get_scan_report(scan_id: str, user: CurrentUser, db: DbSession) -> ReportOut
 @router.websocket("/{scan_id}/ws")
 async def websocket_scan_updates(websocket: WebSocket, scan_id: str):
     """WebSocket endpoint mounted at /api/scans/{scan_id}/ws for live updates."""
+    # Zero-Trust parity with REST: only the scan owner may subscribe.
+    require_scan_access_ws(websocket, scan_id)
     await ws_manager.connect(scan_id, websocket)
     try:
         while True:

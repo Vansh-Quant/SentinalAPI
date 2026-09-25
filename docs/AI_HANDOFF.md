@@ -266,15 +266,37 @@ ws://HOST/ws/scans/{scan_id}
 ws://HOST/api/scans/{scan_id}/ws
 ```
 
+Connections are authenticated. Browsers pass the JWT as the requested
+sub-protocol: `new WebSocket(url, ["bearer", token])`. Non-browser clients may
+use `?token=<JWT>`. The server closes with 1008 when credentials are
+missing/invalid and 4404 when the scan does not exist or is not owned by the
+caller. The frontend in `frontend/app.js` implements the sub-protocol form.
+
 Event types:
 
 - `status`: lifecycle state, often includes progress/message
 - `progress`: progress percentage, endpoint/test counters, message
-- `finding`: newly persisted finding summary
+- `finding`: newly persisted finding summary (emitted by both the local
+  deterministic engine and the external-scanner persistence path)
 - `completed`: final counters and 100 percent progress
 - `error`: failure state/message
 
 The frontend also polls status every 800 ms. Polling is authoritative after a disconnect. The WebSocket server accepts a text message loop and removes disconnected clients.
+
+## Scan Restart Rule
+
+Terminal states are final: `completed`, `failed`, and `cancelled` scans cannot
+be restarted (`POST /api/scans/{id}/start` returns 400). Create a new scan for
+a fresh run; this guarantees findings are never duplicated within one scan.
+
+## Target Policy at Execution Time
+
+The Zero-Trust policy is enforced twice per scan: once when the scan is queued
+(`is_sandboxed_url`) and again immediately before the scanner executes
+(`assert_target_still_sandboxed`). The external scanner request and the
+scanner engine's own HTTP executor never follow redirects, and every target
+hostname must resolve to a private/loopback/link-local address — textual
+bypasses such as `10.0.0.1.evil.com` are rejected after resolution.
 
 ## Database Model
 
